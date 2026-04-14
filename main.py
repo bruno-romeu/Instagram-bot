@@ -1,13 +1,59 @@
-from fastapi import FastAPI, Request, Response
-import requests
 import os
+import requests
+from fastapi import FastAPI, Request, Response
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
+
+load_dotenv()
 app = FastAPI()
 
 #usar essa mesma senha lá no painel da Meta.
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 IG_BOT_ID = os.getenv("IG_BOT_ID")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+# ---------------- CÉREBRO DA IA ----------------
+def pensar_com_ia(mensagem_do_usuario):
+    try:
+        # Aqui você define QUEM o bot é! Altere esse texto como quiser.
+        personalidade = """Você é um assistente virtual de atendimento para um perfil do Instagram. 
+        Seja sempre muito educado, prestativo e use emojis. 
+        Mantenha suas respostas curtas, pois estão sendo lidas em uma DM de celular."""
+
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=mensagem_do_usuario,
+            config=types.GenerateContentConfig(
+                system_instruction=personalidade,
+            )
+        )
+        return response.text
+    except Exception as e:
+        print(f"Erro na IA: {e}")
+        return "Ops, meu cérebro deu um curto-circuito! 🤯 Tente novamente em instantes."
+    
+
+# ---------------- BOCA DO BOT (META API) ----------------
+def send_reply(recipient_id, text_message):
+    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    headers = {"Content-Type": "application/json"}
+    
+    data = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": text_message}
+    }
+    
+    response = requests.post(url, headers=headers, json=data)
+    if response.status_code == 200:
+        print("✅ Resposta enviada com sucesso pro direct!")
+    else:
+        print(f"❌ Erro ao enviar resposta: {response.text}")
+
 
 
 @app.get("/")
@@ -44,17 +90,21 @@ async def receive_message(request: Request):
                     
                     sender_id = messaging_event["sender"]["id"]
                     
-                    # --- A TRAVA DE SEGURANÇA AQUI ---
-                    # Se quem mandou a mensagem foi o próprio bot, a gente ignora!
+                    # Ignora as mensagens que o próprio bot enviou (trava de loop)
                     if sender_id == IG_BOT_ID:
                         return Response(content="EVENT_RECEIVED", status_code=200)
                     
                     message_text = messaging_event.get("message", {}).get("text", "")
                     
-                    print(f"Mensagem recebida de {sender_id}: {message_text}")
-                    
                     if message_text:
-                        send_reply(sender_id, f"Recebi sua mensagem: '{message_text}'. Meu bot tá vivo e não fala mais sozinho! 🤖")
+                        print(f"👤 Usuário disse: {message_text}")
+                        
+                        # 1. Manda a mensagem pra IA pensar
+                        resposta_ia = pensar_com_ia(message_text)
+                        print(f"🤖 IA respondeu: {resposta_ia}")
+                        
+                        # 2. Manda a resposta da IA de volta pro Instagram
+                        send_reply(sender_id, resposta_ia)
 
         return Response(content="EVENT_RECEIVED", status_code=200)
         
