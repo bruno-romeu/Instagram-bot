@@ -1,6 +1,6 @@
 import os
 import requests
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -54,6 +54,19 @@ def send_reply(recipient_id, text_message):
     else:
         print(f"❌ Erro ao enviar resposta: {response.text}")
 
+# ---------------------------------------------------------
+# FUNÇÃO QUE JUNTA O RECEBIMENTO DA MENSAGEM, O PENSAR DA IA E O ENVIO DA RESPOSTA
+# ---------------------------------------------------------
+def processar_mensagem_em_background(sender_id, message_text):
+    print(f"🧠 Processando em background a mensagem de {sender_id}...")
+    # 1. Manda a mensagem pra IA pensar
+    resposta_ia = pensar_com_ia(message_text)
+    print(f"🤖 IA respondeu: {resposta_ia}")
+    
+    # 2. Manda a resposta da IA de volta pro Instagram
+    send_reply(sender_id, resposta_ia)
+
+
 
 
 @app.get("/")
@@ -80,7 +93,7 @@ async def verify_webhook(request: Request):
 # ROTA POST: Onde as mensagens do Instagram vão chegar
 # ---------------------------------------------------------
 @app.post("/webhook")
-async def receive_message(request: Request):
+async def receive_message(request: Request, background_tasks: BackgroundTasks):
     try:
         payload = await request.json()
         
@@ -90,22 +103,19 @@ async def receive_message(request: Request):
                     
                     sender_id = messaging_event["sender"]["id"]
                     
-                    # Ignora as mensagens que o próprio bot enviou (trava de loop)
+                    # Ignora as mensagens que o próprio bot enviou
                     if sender_id == IG_BOT_ID:
-                        return Response(content="EVENT_RECEIVED", status_code=200)
+                        continue # Usa continue para não travar o loop de eventos
                     
                     message_text = messaging_event.get("message", {}).get("text", "")
                     
                     if message_text:
                         print(f"👤 Usuário disse: {message_text}")
                         
-                        # 1. Manda a mensagem pra IA pensar
-                        resposta_ia = pensar_com_ia(message_text)
-                        print(f"🤖 IA respondeu: {resposta_ia}")
-                        
-                        # 2. Manda a resposta da IA de volta pro Instagram
-                        send_reply(sender_id, resposta_ia)
+                        # EM VEZ DE ESPERAR A IA AQUI, JOGAMOS PARA O BACKGROUND!
+                        background_tasks.add_task(processar_mensagem_em_background, sender_id, message_text)
 
+        # Retorna o 200 OK instantaneamente para a Meta não encher o saco!
         return Response(content="EVENT_RECEIVED", status_code=200)
         
     except Exception as e:
