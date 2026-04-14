@@ -1,33 +1,58 @@
-# Instagram DM Bot com FastAPI 🤖📱
+# Instagram DM Bot - FastAPI 🤖
 
-Um bot simples, rápido e escalável construído em Python com FastAPI para interagir automaticamente com Mensagens Diretas (DMs) do Instagram através da API oficial da Meta (Graph API).
+Este projeto é um ponto de partida para criar bots de automação no Instagram utilizando a API oficial da Meta (Graph API). Ele utiliza o framework **FastAPI** para alta performance e facilidade de desenvolvimento.
 
-## 🚀 Funcionalidades
+## Funcionalidades
 
-* **Webhooks em Tempo Real:** Recebe e processa mensagens enviadas para a conta do Instagram instantaneamente.
-* **Respostas Automáticas:** Envia mensagens de volta para o usuário utilizando a Graph API da Meta.
-* **Proteção contra Loop:** Lógica integrada para identificar e ignorar mensagens enviadas pelo próprio bot, evitando o "efeito eco" e bloqueios da API.
+- **Integração com a Meta:** Rota de verificação de Webhook pronta.
+- **Recebimento de Mensagens:** Processa eventos de DM (Direct Messages) em tempo real.
+- **Resposta Automática:** Envia mensagens de volta para o usuário de forma instantânea.
+- **Proteção contra Loop:** Lógica implementada para evitar que o bot responda às suas próprias mensagens (o que gera erro na API).
 
-## 🛠️ Tecnologias Utilizadas
+## 🛠️ Tecnologias
 
-* **Python 3.x**
-* **FastAPI:** Framework web moderno e rápido para construção de APIs.
-* **Uvicorn:** Servidor web ASGI ultra-rápido.
-* **Requests:** Para facilitar as requisições HTTP para os servidores da Meta.
-* **python-dotenv:** Para manter chaves e tokens seguros fora do código fonte.
-* **Ngrok:** Utilizado no ambiente de desenvolvimento para expor o servidor local para a web.
+- [Python 3.10+](https://www.python.org/)
+- [FastAPI](https://fastapi.tiangolo.com/) - Framework web.
+- [Uvicorn](https://www.uvicorn.org/) - Servidor ASGI.
+- [Requests](https://requests.readthedocs.io/) - Para chamadas na Graph API.
+- [Python-dotenv](https://pypi.org/project/python-dotenv/) - Gestão de variáveis de ambiente.
 
-## ⚙️ Pré-requisitos
+## Configuração do Ambiente
 
-Para rodar este projeto, você precisará ter:
-1. Uma conta no [Meta for Developers](https://developers.facebook.com/).
-2. Um Aplicativo criado no painel da Meta com o produto **Webhooks** e **Instagram** configurados.
-3. Uma conta do **Instagram Profissional** (Empresa ou Criador de Conteúdo).
-4. Uma **Página do Facebook** vinculada a essa conta do Instagram.
-
-## 📦 Como Instalar e Rodar Localmente
-
-1. **Clone este repositório:**
+1. **Clone o repositório:**
    ```bash
-   git clone [https://github.com/SEU_USUARIO/SEU_REPOSITORIO.git](https://github.com/SEU_USUARIO/SEU_REPOSITORIO.git)
-   cd SEU_REPOSITORIO
+   git clone [https://github.com/seu-usuario/seu-repositorio.git](https://github.com/seu-usuario/seu-repositorio.git)
+   cd seu-repositorio
+   ```
+
+2. **Crie um arquivo `.env` na raiz do projeto:**
+   ```env
+   VERIFY_TOKEN="sua_senha_do_painel_da_meta"
+   PAGE_ACCESS_TOKEN="seu_token_gigante_gerado_pela_meta"
+   IG_BOT_ID="seu_id_do_instagram_bot"
+   ```
+
+3. **Instale as dependências:**
+   ```bash
+   pip install fastapi uvicorn requests python-dotenv
+   ```
+
+## Como Executar
+
+1. **Inicie o servidor local:**
+   ```bash
+   uvicorn main:app --reload
+   ```
+
+2. **Exponha o servidor com Ngrok (ou similar):**
+   ```bash
+   ngrok http 8000
+   ```
+
+3. **Configure no Painel da Meta:**
+   - **URL de callback:** `https://sua-url-ngrok.io/webhook`
+   - **Token de verificação:** O mesmo que você colocou no seu `.env` (VERIFY_TOKEN).
+   - **Campos de Webhook:** Assine o campo `messages`.
+
+---
+Desenvolvido por bruno-romeu
