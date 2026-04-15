@@ -4,10 +4,22 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from contextlib import asynccontextmanager
+from database import engine, Base
+import models
 
 
 load_dotenv()
 app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+
+# Substitua o seu app = FastAPI() por esta linha:
+app = FastAPI(lifespan=lifespan)
 
 #usar essa mesma senha lá no painel da Meta.
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")

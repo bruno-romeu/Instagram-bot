@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: claude_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    container_name: claude_fastapi
+    restart: always
+    depends_on:
+      - db
+    env_file:
+      - .env
+    # O FastAPI já terá acesso a todas as variáveis do .env via env_file
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/claude-app
+
+volumes:
+  postgres_data:
