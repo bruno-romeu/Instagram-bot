@@ -7,6 +7,8 @@ from google.genai import types
 from contextlib import asynccontextmanager
 from database import engine, Base
 import models
+from database import AsyncSessionLocal
+import crud
 
 
 load_dotenv()
@@ -30,24 +32,32 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ---------------- CÉREBRO DA IA ----------------
-def pensar_com_ia(mensagem_do_usuario):
+async def pensar_com_ia(historico_mensagens):
     try:
-        # Aqui você define QUEM o bot é! Altere esse texto como quiser.
         personalidade = """Você é um assistente virtual de atendimento para um perfil do Instagram. 
         Seja sempre muito educado, prestativo e use emojis. 
         Mantenha suas respostas curtas, pois estão sendo lidas em uma DM de celular."""
 
-        response = client.models.generate_content(
+        # Transforma as mensagens do banco de dados em um texto de roteiro de teatro
+        texto_historico = "Histórico recente da conversa:\n"
+        for msg in historico_mensagens:
+            quem = "Cliente" if msg.remetente == "user" else "Você"
+            texto_historico += f"{quem}: {msg.conteudo}\n"
+            
+        texto_historico += "Você: " # Deixa a "deixa" para a IA responder
+
+        # O novo SDK do Google tem um método .aio para rodar de forma assíncrona
+        response = await client.aio.models.generate_content(
             model='gemini-2.5-flash',
-            contents=mensagem_do_usuario,
+            contents=texto_historico,
             config=types.GenerateContentConfig(
                 system_instruction=personalidade,
             )
         )
         return response.text
     except Exception as e:
-        print(f"Erro na IA: {e}")
-        return "Ops, meu cérebro deu um curto-circuito! 🤯 Tente novamente em instantes."
+        print(f"❌ Erro na IA: {e}")
+        return "Ops, tive um pequeno problema técnico! 🤯 Podes repetir?"
     
 
 # ---------------- BOCA DO BOT (META API) ----------------
@@ -69,14 +79,30 @@ def send_reply(recipient_id, text_message):
 # ---------------------------------------------------------
 # FUNÇÃO QUE JUNTA O RECEBIMENTO DA MENSAGEM, O PENSAR DA IA E O ENVIO DA RESPOSTA
 # ---------------------------------------------------------
-def processar_mensagem_em_background(sender_id, message_text):
-    print(f"🧠 Processando em background a mensagem de {sender_id}...")
-    # 1. Manda a mensagem pra IA pensar
-    resposta_ia = pensar_com_ia(message_text)
-    print(f"🤖 IA respondeu: {resposta_ia}")
+async def processar_mensagem_em_background(sender_id, message_text):
+    print(f"🧠 Abrindo conexão com o banco para {sender_id}...")
     
-    # 2. Manda a resposta da IA de volta pro Instagram
-    send_reply(sender_id, resposta_ia)
+    # Abre a sessão com o PostgreSQL
+    async with AsyncSessionLocal() as db:
+        
+        # 1. Reconhece o cliente (cria ou busca no banco)
+        usuario = await crud.get_or_create_user(db, sender_id)
+        
+        # 2. Salva a mensagem que o cliente acabou de mandar
+        await crud.save_message(db, usuario.id, "user", message_text)
+        
+        # 3. Resgata o histórico das últimas mensagens
+        historico = await crud.get_historico_mensagens(db, usuario.id)
+        
+        # 4. Envia o histórico para a IA ler e formular a resposta
+        print(f"🤖 Lendo contexto e pensando...")
+        resposta_ia = await pensar_com_ia(historico)
+        
+        # 5. Salva a resposta da IA no banco de dados para a memória não se perder
+        await crud.save_message(db, usuario.id, "ai", resposta_ia)
+        
+        # 6. Manda a resposta lá pro Instagram via API da Meta
+        send_reply(sender_id, resposta_ia)
 
 
 
