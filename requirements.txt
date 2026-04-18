@@ -47,3 +47,5 @@ websockets==16.0
 sqlalchemy
 asyncpg
 greenlet
+Pillow==10.2.0
+feedparser

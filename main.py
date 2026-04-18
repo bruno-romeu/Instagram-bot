@@ -9,6 +9,11 @@ from database import engine, Base, AsyncSessionLocal
 import models
 import crud
 import asyncio
+import json
+import textwrap
+import feedparser
+import random
+from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
 
@@ -56,6 +61,37 @@ DIRETRIZES DE ATENDIMENTO E VENDAS:
 Sua meta final é sempre gerar valor e facilitar a ponte entre os seguidores qualificados e os produtos do Daniel.
 """
 
+
+PROMPT_CRIADOR_CARROSSEL = """
+Você é um Copywriter e Estrategista de Redes Sociais de alto nível, trabalhando para o empresário Daniel Fabiano.
+Sua função é criar scripts magnéticos para posts no formato CARROSSEL DE TEXTO no Instagram.
+O foco são empresários que buscam multiplicar patrimônio, princípios cristãos nos negócios e excelência na gestão.
+
+DIRETRIZES DE ESTILO:
+- Evite linguagem robótica ou clichês de IA (ex: "desvendar", "mergulhar", "no cenário atual", "divisor de águas").
+- Escreva como um empresário experiente conversando com outro empresário de forma direta, madura e sem rodeios.
+
+ESTRUTURA DO CARROSSEL:
+1. Uma legenda (Copy) persuasiva que vai na descrição do post, com emojis moderados e hashtags.
+2. Um Array de 4 a 7 "slides".
+3. O Slide 1 DEVE ser um Título/Hook muito forte (máximo de 15 palavras).
+4. Os Slides intermediários devem desenvolver o raciocínio (máximo de 20 palavras por slide para caber bem na arte).
+5. O último Slide DEVE ser uma CTA (Call to Action) clara.
+
+REGRAS DE FORMATAÇÃO:
+Você DEVE retornar APENAS um objeto JSON válido, sem nenhum texto adicional antes ou depois (sem markdown de ```json), com a seguinte estrutura exata:
+{
+    "tema": "Resumo do tema",
+    "legenda": "A copy completa para a descrição do post do Instagram...",
+    "slides": [
+        {"numero": 1, "texto": "Hook impactante aqui"},
+        {"numero": 2, "texto": "Desenvolvimento parte 1"},
+        {"numero": 3, "texto": "Desenvolvimento parte 2"},
+        {"numero": 4, "texto": "CTA finalizando o post"}
+    ]
+}
+"""
+
 # ---------------- CÉREBRO DA IA ----------------
 async def pensar_com_ia(historico_mensagens, max_tentativas=3):
         # Transforma as mensagens do banco de dados em um texto de roteiro de teatro
@@ -92,6 +128,41 @@ async def pensar_com_ia(historico_mensagens, max_tentativas=3):
 
         # Se esgotar as tentativas ou der um erro grave, manda a mensagem de fallback elegante
         return "Para essa questão, vou pedir para nossa equipe humana te auxiliar por aqui. Aguarde um instante, por favor."
+
+
+
+async def gerar_post_ia(noticias_do_dia: str):
+    print("🧠 Analisando as notícias para criar um conteúdo original...")
+    
+    # O comando que instrui a IA a escolher o tema
+    comando_dinamico = f"""
+    Aqui estão as 5 principais notícias do mundo dos negócios hoje:
+    
+    {noticias_do_dia}
+    
+    TAREFA:
+    1. Escolha UMA dessas notícias que seja mais relevante para empresários.
+    2. Crie um post carrossel conectando essa notícia com a importância de ter excelência na gestão, princípios sólidos ou multiplicação de patrimônio (que são os pilares do Daniel Fabiano).
+    3. Retorne no formato JSON exigido.
+    """
+    
+    try:
+        response = await client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=comando_dinamico,
+            config=types.GenerateContentConfig(
+                system_instruction=PROMPT_CRIADOR_CARROSSEL, 
+                response_mime_type="application/json",
+            )
+        )
+        
+        post_gerado = json.loads(response.text)
+        return post_gerado
+
+    except Exception as e:
+        print(f"❌ Erro ao gerar conteúdo: {e}")
+        return None
+    
 
 # ---------------- BOCA DO BOT (META API) ----------------
 def send_reply(recipient_id, text_message):
@@ -165,7 +236,26 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
                     if sender_id == IG_BOT_ID:
                         continue 
                     
-                    message_text = messaging_event.get("message", {}).get("text", "")
+                    message = messaging_event.get("message", {})
+                    
+                    if "reaction" in messaging_event:
+                        print(f"👍 O usuário reagiu a uma mensagem.")
+                        continue # Não precisamos responder a reações de mensagens
+                    
+                    attachments = message.get("attachments", [])
+                    if attachments:
+                        tipo_anexo = attachments[0].get("type")
+                        print(f"📎 Usuário enviou um anexo do tipo: {tipo_anexo}")
+                        
+                        # Resposta elegante do Daniel para arquivos não suportados
+                        resposta_anexo = "Agradeço o envio, mas por enquanto minha equipe configurou este canal apenas para texto. Poderia escrever sua dúvida ou mensagem para mim, por favor? 🤝"
+                        
+                        # Manda a resposta imediatamente
+                        send_reply(sender_id, resposta_anexo)
+                        continue # Pula para o próximo evento, não chama a IA
+                    
+                    # Se for TEXTO, segue o fluxo normal que criamos
+                    message_text = message.get("text", "")
                     
                     if message_text:
                         print(f"👤 Usuário disse: {message_text}")
@@ -176,5 +266,121 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
         return Response(content="EVENT_RECEIVED", status_code=200)
         
     except Exception as e:
-        print(f"Erro ao processar o webhook: {e}")
+        print(f"❌ Erro ao processar o webhook: {e}")
         return Response(content="Erro interno", status_code=500)
+    
+
+
+def buscar_tendencias_empresariais():
+    print("📰 Varrendo o mercado em busca de tendências quentes...")
+    
+    # URL do feed de Negócios do InfoMoney (você pode trocar por Forbes, Exame, etc.)
+    url_rss = "https://www.infomoney.com.br/negocios/feed/"
+    
+    feed = feedparser.parse(url_rss)
+    
+    if not feed.entries:
+        return "A importância da adaptabilidade em tempos de crise." # Fallback seguro caso a internet falhe
+        
+    noticias_do_dia = []
+    
+    # Pega as 5 notícias mais recentes do topo do portal
+    for artigo in feed.entries[:5]:
+        noticias_do_dia.append(f"- {artigo.title}")
+        
+    tendencias_formatadas = "\n".join(noticias_do_dia)
+    
+    print("✅ Tendências encontradas:")
+    print(tendencias_formatadas)
+    
+    return tendencias_formatadas
+    
+
+@app.get("/testar-criacao-autonoma")
+async def testar_criacao_autonoma():
+    # 1. O código busca as notícias do dia sozinho
+    tendencias = buscar_tendencias_empresariais()
+    
+    # 2. A IA lê as notícias, escolhe uma e gera a copy estruturada
+    post_json = await gerar_post_ia(tendencias)
+    
+    if post_json:
+        # 3. O Pillow desenha os slides
+        arquivos_gerados = criar_slides_carrossel(post_json)
+        
+        return {
+            "status": "sucesso", 
+            "arquivos": arquivos_gerados,
+            "legenda_pronta": post_json["legenda"],
+            "tema_escolhido": post_json.get("tema", "Tema Automático")
+        }
+    else:
+        return {"status": "erro", "mensagem": "A IA falhou na criação."}
+    
+
+
+def criar_slides_carrossel(dados_post):
+    print("🖌️ Iniciando a criação das imagens do carrossel...")
+    
+    caminho_template = "template_base.jpg"
+    pasta_saida = "carrossel_pronto"
+    
+    # Cria uma pasta para não bagunçar seus arquivos
+    if not os.path.exists(pasta_saida):
+        os.makedirs(pasta_saida)
+
+    caminhos_imagens = []
+
+    # Carrega a fonte (Ajuste o nome do arquivo para a fonte que você baixou)
+    try:
+        fonte_path = "Montserrat-Bold.ttf" 
+        fonte = ImageFont.truetype(fonte_path, size=55)
+    except IOError:
+        print("⚠️ Fonte não encontrada. Usando fonte padrão do sistema.")
+        fonte = ImageFont.load_default()
+
+    # O laço mágico: faz isso para cada slide do JSON
+    for slide in dados_post["slides"]:
+        numero = slide["numero"]
+        texto = slide["texto"]
+
+        # 1. Abre a imagem de fundo nova
+        try:
+            imagem = Image.open(caminho_template)
+        except FileNotFoundError:
+            print(f"❌ Erro: O arquivo {caminho_template} não foi encontrado.")
+            return []
+
+        draw = ImageDraw.Draw(imagem)
+        largura_imagem, altura_imagem = imagem.size
+
+        # 2. Quebra o texto em várias linhas (35 caracteres por linha, ajuste se precisar)
+        linhas = textwrap.wrap(texto, width=35) 
+        
+        # 3. Calcula a altura total do bloco de texto para centralizar verticalmente
+        bbox_fonte = draw.textbbox((0, 0), "A", font=fonte)
+        altura_linha = bbox_fonte[3] - bbox_fonte[1] + 15 # 15px de espaçamento entre linhas
+        altura_total_texto = altura_linha * len(linhas)
+        
+        eixo_y_atual = (altura_imagem - altura_total_texto) / 2
+
+        # 4. Desenha cada linha centralizada horizontalmente
+        for linha in linhas:
+            bbox_linha = draw.textbbox((0, 0), linha, font=fonte)
+            largura_linha = bbox_linha[2] - bbox_linha[0]
+            
+            eixo_x = (largura_imagem - largura_linha) / 2
+            
+            # Desenha o texto em branco puro
+            draw.text((eixo_x, eixo_y_atual), linha, font=fonte, fill=(255, 255, 255))
+            
+            eixo_y_atual += altura_linha
+
+        # 5. Salva a imagem finalizada na pasta
+        nome_arquivo = f"{pasta_saida}/slide_{numero}.png"
+        imagem.save(nome_arquivo)
+        caminhos_imagens.append(nome_arquivo)
+        
+        print(f"✅ Slide {numero} gerado: {nome_arquivo}")
+
+    return caminhos_imagens

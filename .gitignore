@@ -3,3 +3,6 @@
 *.env
 /_pycache_
 *.pyc
+*.jpg
+*.ttf
+/carrossel_pronto
