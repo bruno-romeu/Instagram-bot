@@ -1,7 +1,10 @@
+from glob import glob
 import os
 import traceback
 import requests
 from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -25,6 +28,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+pasta_imagens = "carrossel_pronto"
+if not os.path.exists(pasta_imagens):
+    os.makedirs(pasta_imagens)
+
 # Credenciais
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
@@ -35,6 +42,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 # Inicializa o cliente novo do Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
+
 
 # ---------------- A ALMA DO BOT ----------------
 SYSTEM_PROMPT = """
@@ -211,6 +219,19 @@ async def processar_mensagem_em_background(sender_id, message_text):
 def home():
     return {"status": "Servidor rodando!"}
 
+@app.get("/robots.txt")
+async def robots():
+    return Response(content="User-agent: *\nAllow: /", media_type="text/plain")
+
+@app.get("/imagens/{nome_arquivo}")
+async def servir_imagem(nome_arquivo: str):
+    caminho_arquivo = os.path.join(pasta_imagens, nome_arquivo)
+    
+    if os.path.exists(caminho_arquivo):
+        return FileResponse(caminho_arquivo, media_type="image/png")
+    
+    return Response(content="Imagem não encontrada", status_code=404)
+
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     mode = request.query_params.get("hub.mode")
@@ -380,8 +401,8 @@ def criar_slides_carrossel(dados_post):
             eixo_y_atual += altura_linha
 
         # 5. Salva a imagem finalizada na pasta
-        nome_arquivo = f"{pasta_saida}/slide_{numero}.png"
-        imagem.save(nome_arquivo)
+        nome_arquivo = f"{pasta_saida}/slide_{numero}.jpg"
+        imagem.save(nome_arquivo, "JPEG", quality=85)
         caminhos_imagens.append(nome_arquivo)
         
         print(f"✅ Slide {numero} gerado: {nome_arquivo}")
@@ -395,27 +416,35 @@ async def telegram_webhook(request: Request):
     
     try:
         dados = await request.json()
-        print(f"📦 [RAIO-X] Pacote recebido: {dados}", flush=True)
         
         if "callback_query" in dados:
             callback = dados["callback_query"]
             acao = callback["data"] 
             chat_id = callback["message"]["chat"]["id"]
             
-            print(f"👉 [RAIO-X] Você clicou no botão: {acao}", flush=True)
             
             url_mensagem = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
             
             if acao == "aprovar_post":
-                print("✅ [RAIO-X] Tentando enviar mensagem de APROVADO...", flush=True)
-                resposta = requests.post(url_mensagem, data={
+                requests.post(url_mensagem, data={
                     'chat_id': chat_id, 
                     'text': "🚀 Post aprovado! Iniciando o protocolo de publicação no Instagram..."
                 })
-                print(f"📡 Status da resposta do Telegram: {resposta.status_code}", flush=True)
+                
+                # 1. Pega a URL raiz atual do Ngrok (ex: https://abc.ngrok.dev/)
+                url_base_ngrok = str(request.base_url).replace("http://", "https://")
+                
+                # 2. Chama a função de postar (Como não passamos os caminhos e legenda pelo Telegram,
+                # para o teste de agora vamos varrer a pasta. Em um projeto robusto, salvaríamos isso no banco).
+                caminhos_atuais = sorted(glob("carrossel_pronto/*.jpg"))
+                
+                # Para o teste, usamos uma legenda genérica, ou você pode buscar a última gerada
+                legenda_teste = "🔥 Novo post sobre mentalidade empresarial! O que você acha disso? #business #sucesso"
+                
+                # 3. Dispara a publicação (em background para não travar o Telegram)
+                asyncio.create_task(publicar_carrossel_instagram(caminhos_atuais, legenda_teste, url_base_ngrok))
                 
             elif acao == "recusar_post":
-                print("❌ [RAIO-X] Tentando enviar mensagem de RECUSADO...", flush=True)
                 requests.post(url_mensagem, data={
                     'chat_id': chat_id, 
                     'text': "🗑️ Post descartado. Fique à vontade para gerar uma nova opção."
@@ -431,3 +460,95 @@ async def telegram_webhook(request: Request):
         print(f"🚨 [RAIO-X] DEU ERRO NO CÓDIGO: {e}", flush=True)
         traceback.print_exc()
         return {"status": "erro"}
+    
+
+def hospedar_imagem_catbox(caminho_imagem):
+    print(f"Subindo {caminho_imagem} para o Catbox...")
+    url = "https://catbox.moe/user/api.php"
+    
+    with open(caminho_imagem, "rb") as f:
+        payload = {"reqtype": "fileupload"}
+        files = {"fileToUpload": f}
+        resposta = requests.post(url, data=payload, files=files)
+        
+    if resposta.status_code == 200:
+        link_direto = resposta.text.strip()
+        print(f"Link limpo gerado: {link_direto}")
+        return link_direto
+    else:
+        print("❌ Erro no Catbox:", resposta.text)
+        return None
+
+
+async def publicar_carrossel_instagram(caminhos_imagens, legenda, url_base):
+    print("Iniciando protocolo de publicação na Meta API...")
+    
+    # Precisamos do ID da sua conta do Instagram (pode ser o mesmo IG_BOT_ID dependendo de como você pegou, 
+    # mas o correto é o Instagram Business Account ID)
+    IG_ACCOUNT_ID = os.getenv("IG_BOT_ID") 
+    ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
+    
+    ids_das_imagens = []
+    
+    # --- PASSO 1: Criar os "Item Containers" (um para cada imagem) ---
+    for caminho in caminhos_imagens:
+        
+        # 1. Fazemos o upload para a nuvem ninja e pegamos o link blindado
+        url_imagem_publica = hospedar_imagem_catbox(caminho)
+        
+        if not url_imagem_publica:
+            return False # Se falhar, aborta a missão
+            
+        print(f"📡 Subindo imagem para os servidores da Meta: {url_imagem_publica}")
+        
+        url_upload = f"https://graph.facebook.com/v19.0/{IG_ACCOUNT_ID}/media"
+        payload_upload = {
+            "image_url": url_imagem_publica,
+            "is_carousel_item": "true",
+            "access_token": ACCESS_TOKEN
+        }
+        
+        resposta_upload = requests.post(url_upload, data=payload_upload).json()
+        
+        if "id" in resposta_upload:
+            ids_das_imagens.append(resposta_upload["id"])
+            print("Dando 5 segundos de respiro pro servidor do Instagram e do Catbox...")
+            await asyncio.sleep(5)
+        else:
+            print(f"❌ Erro ao subir imagem: {resposta_upload}")
+            return False
+
+    # --- PASSO 2: Criar o "Carousel Container" ---
+    url_container = f"https://graph.facebook.com/v19.0/{IG_ACCOUNT_ID}/media"
+    payload_container = {
+        "media_type": "CAROUSEL",
+        "children": ",".join(ids_das_imagens),
+        "caption": legenda,
+        "access_token": ACCESS_TOKEN
+    }
+    
+    resposta_container = requests.post(url_container, data=payload_container).json()
+    
+    if "id" not in resposta_container:
+        print(f"❌ Erro ao criar o container do carrossel: {resposta_container}")
+        return False
+        
+    container_id = resposta_container["id"]
+    print("✅ Carrossel montado! ID:", container_id)
+
+    # --- PASSO 3: Publicar de Verdade ---
+    print("Publicando...")
+    url_publish = f"https://graph.facebook.com/v19.0/{IG_ACCOUNT_ID}/media_publish"
+    payload_publish = {
+        "creation_id": container_id,
+        "access_token": ACCESS_TOKEN
+    }
+    
+    resposta_publish = requests.post(url_publish, data=payload_publish).json()
+    
+    if "id" in resposta_publish:
+        print("Post publicado!")
+        return True
+    else:
+        print(f"❌ Erro na publicação final: {resposta_publish}")
+        return False
