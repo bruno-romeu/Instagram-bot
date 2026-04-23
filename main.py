@@ -1,4 +1,5 @@
 import os
+import traceback
 import requests
 from fastapi import FastAPI, Request, Response, BackgroundTasks
 from dotenv import load_dotenv
@@ -6,13 +7,12 @@ from google import genai
 from google.genai import types
 from contextlib import asynccontextmanager
 from database import engine, Base, AsyncSessionLocal
-import models
+from telegram_service import enviar_para_aprovacao_telegram
 import crud
 import asyncio
 import json
 import textwrap
 import feedparser
-import random
 from PIL import Image, ImageDraw, ImageFont
 
 load_dotenv()
@@ -30,6 +30,8 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 IG_BOT_ID = os.getenv("IG_BOT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
 # Inicializa o cliente novo do Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -73,7 +75,7 @@ DIRETRIZES DE ESTILO:
 
 ESTRUTURA DO CARROSSEL:
 1. Uma legenda (Copy) persuasiva que vai na descrição do post, com emojis moderados e hashtags.
-2. Um Array de 4 a 7 "slides".
+2. Um Array de 4 a 5 "slides".
 3. O Slide 1 DEVE ser um Título/Hook muito forte (máximo de 15 palavras).
 4. Os Slides intermediários devem desenvolver o raciocínio (máximo de 20 palavras por slide para caber bem na arte).
 5. O último Slide DEVE ser uma CTA (Call to Action) clara.
@@ -307,12 +309,13 @@ async def testar_criacao_autonoma():
     if post_json:
         # 3. O Pillow desenha os slides
         arquivos_gerados = criar_slides_carrossel(post_json)
+
+        enviar_para_aprovacao_telegram(arquivos_gerados, post_json["legenda"])
         
         return {
             "status": "sucesso", 
             "arquivos": arquivos_gerados,
-            "legenda_pronta": post_json["legenda"],
-            "tema_escolhido": post_json.get("tema", "Tema Automático")
+            "mensagem": "Verifique o seu telegram para aprovar"
         }
     else:
         return {"status": "erro", "mensagem": "A IA falhou na criação."}
@@ -384,3 +387,47 @@ def criar_slides_carrossel(dados_post):
         print(f"✅ Slide {numero} gerado: {nome_arquivo}")
 
     return caminhos_imagens
+
+
+@app.post("/webhook-telegram")
+async def telegram_webhook(request: Request):
+    print("🔔 [RAIO-X] O TELEGRAM BATEU NA PORTA!", flush=True)
+    
+    try:
+        dados = await request.json()
+        print(f"📦 [RAIO-X] Pacote recebido: {dados}", flush=True)
+        
+        if "callback_query" in dados:
+            callback = dados["callback_query"]
+            acao = callback["data"] 
+            chat_id = callback["message"]["chat"]["id"]
+            
+            print(f"👉 [RAIO-X] Você clicou no botão: {acao}", flush=True)
+            
+            url_mensagem = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            
+            if acao == "aprovar_post":
+                print("✅ [RAIO-X] Tentando enviar mensagem de APROVADO...", flush=True)
+                resposta = requests.post(url_mensagem, data={
+                    'chat_id': chat_id, 
+                    'text': "🚀 Post aprovado! Iniciando o protocolo de publicação no Instagram..."
+                })
+                print(f"📡 Status da resposta do Telegram: {resposta.status_code}", flush=True)
+                
+            elif acao == "recusar_post":
+                print("❌ [RAIO-X] Tentando enviar mensagem de RECUSADO...", flush=True)
+                requests.post(url_mensagem, data={
+                    'chat_id': chat_id, 
+                    'text': "🗑️ Post descartado. Fique à vontade para gerar uma nova opção."
+                })
+                
+            url_answer = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+            requests.post(url_answer, data={'callback_query_id': callback['id']})
+
+        return {"status": "ok"}
+
+    except Exception as e:
+        # Se qualquer coisa der errado, ele vai gritar o erro no terminal
+        print(f"🚨 [RAIO-X] DEU ERRO NO CÓDIGO: {e}", flush=True)
+        traceback.print_exc()
+        return {"status": "erro"}
