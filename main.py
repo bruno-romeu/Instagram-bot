@@ -17,6 +17,8 @@ import json
 import textwrap
 import feedparser
 from PIL import Image, ImageDraw, ImageFont
+import cloudinary
+import cloudinary.uploader
 
 load_dotenv()
 
@@ -42,6 +44,10 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 # Inicializa o cliente novo do Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+# Armazena o último post gerado para ser usado na aprovação do Telegram
+ultimo_post_gerado = {"legenda": None, "arquivos": []}
+_mids_processados: set = set()
 
 
 # ---------------- A ALMA DO BOT ----------------
@@ -176,7 +182,13 @@ async def gerar_post_ia(noticias_do_dia: str):
 
 # ---------------- BOCA DO BOT (META API) ----------------
 def send_reply(recipient_id, text_message):
-    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    if not IG_BOT_ID:
+        print("❌ ERRO: IG_BOT_ID não configurado no .env")
+        return
+
+    # Retornando ao ID fixo. O erro #3 é resolvido com o toggle 'Allow Access to Messages' no App do Instagram.
+    url = f"https://graph.facebook.com/v21.0/me/messages"
+    params = {"access_token": PAGE_ACCESS_TOKEN}
     headers = {"Content-Type": "application/json"}
     
     data = {
@@ -184,9 +196,9 @@ def send_reply(recipient_id, text_message):
         "message": {"text": text_message}
     }
     
-    response = requests.post(url, headers=headers, json=data)
+    response = requests.post(url, params=params, json=data, headers=headers)
     if response.status_code == 200:
-        print("✅ Resposta enviada com sucesso pro direct!")
+        print(f"✅ Resposta enviada com sucesso para {recipient_id}!")
     else:
         print(f"❌ Erro ao enviar resposta: {response.text}")
 
@@ -213,6 +225,53 @@ async def processar_mensagem_em_background(sender_id, message_text):
         
         # 6. Manda a resposta lá pro Instagram via API da Meta
         send_reply(sender_id, resposta_ia)
+
+
+async def responder_comentario_instagram(comment_id: str, texto_usuario: str, username: str):
+    print(f"💬 Analisando comentário de @{username}: '{texto_usuario}'")
+    
+    prompt_comentario = f"""
+    Você é o assistente virtual da equipe do empresário e mentor Daniel Fabiano (@eusoudanielfabiano).
+    Sua missão é interagir com os seguidores nos comentários das postagens de forma premium, educada e estratégica.
+    
+    Um usuário chamado @{username} acabou de comentar o seguinte no nosso post: "{texto_usuario}"
+    
+    DIRETRIZES PARA A RESPOSTA:
+    - Seja humano, maduro e direto ao ponto (você fala com outros empresários).
+    - Agradeça, concorde ou agregue um pequeno valor ao que a pessoa disse.
+    - Resposta curta! No máximo 1 ou 2 frases.
+    - Use 1 ou 2 emojis elegantes (ex: 🚀, 🤝, 🎯, 💼, 🔥).
+    - Não use hashtags.
+    - NUNCA ofereça links de vendas nos comentários a não ser que a pessoa peça explicitamente.
+    
+    Retorne APENAS o texto da resposta, sem aspas ou textos adicionais.
+    """
+    
+    try:
+        resposta_ia = await client.aio.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=prompt_comentario,
+        )
+        
+        texto_resposta = resposta_ia.text.strip()
+        print(f"🤖 Resposta gerada para @{username}: {texto_resposta}")
+        
+        # 2. Envia a resposta para a Meta usando o endpoint correto de replies
+        url = f"https://graph.facebook.com/v19.0/{comment_id}/replies"
+        payload = {
+            "message": texto_resposta,
+            "access_token": PAGE_ACCESS_TOKEN
+        }
+        
+        resposta_meta = requests.post(url, data=payload).json()
+        
+        if "id" in resposta_meta:
+            print(f"✅ Comentário de @{username} respondido com sucesso!")
+        else:
+            print(f"❌ Erro ao responder comentário: {resposta_meta}")
+            
+    except Exception as e:
+        print(f"❌ Erro na IA ao responder comentário: {e}")
 
 # ---------------- ROTAS FASTAPI ----------------
 @app.get("/")
@@ -248,48 +307,75 @@ async def verify_webhook(request: Request):
 async def receive_message(request: Request, background_tasks: BackgroundTasks):
     try:
         payload = await request.json()
+        print(f"📥 Payload recebido do webhook: {json.dumps(payload, indent=2)}")
         
         if payload.get("object") == "instagram":
             for entry in payload.get("entry", []):
-                for messaging_event in entry.get("messaging", []):
-                    
-                    sender_id = messaging_event["sender"]["id"]
-                    
-                    # Ignora as mensagens que o próprio bot enviou
-                    if sender_id == IG_BOT_ID:
-                        continue 
-                    
-                    message = messaging_event.get("message", {})
-                    
-                    if "reaction" in messaging_event:
-                        print(f"👍 O usuário reagiu a uma mensagem.")
-                        continue # Não precisamos responder a reações de mensagens
-                    
-                    attachments = message.get("attachments", [])
-                    if attachments:
-                        tipo_anexo = attachments[0].get("type")
-                        print(f"📎 Usuário enviou um anexo do tipo: {tipo_anexo}")
+                # Processa DMs
+                if "messaging" in entry:
+                    for messaging_event in entry.get("messaging", []):
+                        # Ignora eventos sem sender (read receipts, echos, etc)
+                        if "sender" not in messaging_event:
+                            continue
                         
-                        # Resposta elegante do Daniel para arquivos não suportados
-                        resposta_anexo = "Agradeço o envio, mas por enquanto minha equipe configurou este canal apenas para texto. Poderia escrever sua dúvida ou mensagem para mim, por favor? 🤝"
+                        sender_id = messaging_event["sender"]["id"]
                         
-                        # Manda a resposta imediatamente
-                        send_reply(sender_id, resposta_anexo)
-                        continue # Pula para o próximo evento, não chama a IA
-                    
-                    # Se for TEXTO, segue o fluxo normal que criamos
-                    message_text = message.get("text", "")
-                    
-                    if message_text:
-                        print(f"👤 Usuário disse: {message_text}")
-                        # Joga o processo para o background
-                        background_tasks.add_task(processar_mensagem_em_background, sender_id, message_text)
+                        if sender_id == IG_BOT_ID:
+                            continue
+                        
+                        # Ignora echos (mensagens enviadas pelo próprio bot)
+                        message = messaging_event.get("message", {})
+                        if message.get("is_echo"):
+                            continue
+                        
+                        if "reaction" in messaging_event:
+                            continue
+                        
+                        attachments = message.get("attachments", [])
+                        if attachments:
+                            send_reply(sender_id, "Agradeço o envio, mas por enquanto minha equipe configurou este canal apenas para texto. Poderia escrever sua dúvida ou mensagem para mim, por favor? 🤝")
+                            continue
+                        
+                        mid = message.get("mid", "")
+                        if mid and mid in _mids_processados:
+                            print(f"⏭️ Mensagem duplicada ignorada (mid): {mid[:30]}...")
+                            continue
+                        if mid:
+                            _mids_processados.add(mid)
+                            if len(_mids_processados) > 500:
+                                _mids_processados.pop()
 
-        # Retorna o 200 OK instantaneamente para a Meta
+                        message_text = message.get("text", "")
+                        if message_text:
+                            print(f"👤 Usuário {sender_id} disse: {message_text}")
+                            background_tasks.add_task(processar_mensagem_em_background, sender_id, message_text)
+                # Processa Comentários
+                if "changes" in entry:
+                    for change in entry.get("changes", []):
+                        if change.get("field") == "comments":
+                            valor = change.get("value", {})
+                            print(f"💬 Novo comentário detectado: {valor}")
+                            
+                            comment_id = valor.get("id")
+                            texto_comentario = valor.get("text")
+                            from_data = valor.get("from", {})
+                            username = from_data.get("username", "usuário")
+                            from_id = from_data.get("id", "")
+                            
+                            if from_id == IG_BOT_ID or username == "eusoudanielfabiano":
+                                print(f"⏭️ Ignorando comentário do próprio bot/perfil.")
+                                continue
+                                
+                            if texto_comentario and comment_id:
+                                background_tasks.add_task(
+                                    responder_comentario_instagram, 
+                                    comment_id, 
+                                    texto_comentario, 
+                                    username
+                                )
         return Response(content="EVENT_RECEIVED", status_code=200)
-        
     except Exception as e:
-        print(f"❌ Erro ao processar o webhook: {e}")
+        print(f"❌ Erro ao processar o webhook: {traceback.format_exc()}")
         return Response(content="Erro interno", status_code=500)
     
 
@@ -330,6 +416,10 @@ async def testar_criacao_autonoma():
     if post_json:
         # 3. O Pillow desenha os slides
         arquivos_gerados = criar_slides_carrossel(post_json)
+
+        # Salva o post atual em memória para ser recuperado na aprovação do Telegram
+        ultimo_post_gerado["legenda"] = post_json["legenda"]
+        ultimo_post_gerado["arquivos"] = arquivos_gerados
 
         enviar_para_aprovacao_telegram(arquivos_gerados, post_json["legenda"])
         
@@ -431,24 +521,26 @@ async def telegram_webhook(request: Request):
                     'text': "🚀 Post aprovado! Iniciando o protocolo de publicação no Instagram..."
                 })
                 
-                # 1. Pega a URL raiz atual do Ngrok (ex: https://abc.ngrok.dev/)
                 url_base_ngrok = str(request.base_url).replace("http://", "https://")
                 
-                # 2. Chama a função de postar (Como não passamos os caminhos e legenda pelo Telegram,
-                # para o teste de agora vamos varrer a pasta. Em um projeto robusto, salvaríamos isso no banco).
-                caminhos_atuais = sorted(glob("carrossel_pronto/*.jpg"))
+                # Usa os arquivos e a legenda real do último post gerado
+                caminhos_atuais = ultimo_post_gerado["arquivos"]
+                legenda_real = ultimo_post_gerado["legenda"] or "🔥 Novo post! #business #sucesso"
                 
-                # Para o teste, usamos uma legenda genérica, ou você pode buscar a última gerada
-                legenda_teste = "🔥 Novo post sobre mentalidade empresarial! O que você acha disso? #business #sucesso"
-                
-                # 3. Dispara a publicação (em background para não travar o Telegram)
-                asyncio.create_task(publicar_carrossel_instagram(caminhos_atuais, legenda_teste, url_base_ngrok))
+                asyncio.create_task(publicar_carrossel_instagram(caminhos_atuais, legenda_real, url_base_ngrok))
                 
             elif acao == "recusar_post":
                 requests.post(url_mensagem, data={
                     'chat_id': chat_id, 
                     'text': "🗑️ Post descartado. Fique à vontade para gerar uma nova opção."
                 })
+                
+                # Limpa os slides da pasta para não acumular arquivos antigos
+                for arquivo in glob("carrossel_pronto/*.jpg"):
+                    os.remove(arquivo)
+                ultimo_post_gerado["legenda"] = None
+                ultimo_post_gerado["arquivos"] = []
+                print("🧹 Slides antigos removidos da pasta.")
                 
             url_answer = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
             requests.post(url_answer, data={'callback_query_id': callback['id']})
@@ -462,21 +554,22 @@ async def telegram_webhook(request: Request):
         return {"status": "erro"}
     
 
-def hospedar_imagem_catbox(caminho_imagem):
-    print(f"Subindo {caminho_imagem} para o Catbox...")
-    url = "https://catbox.moe/user/api.php"
+def hospedar_imagem_cloudinary(caminho_imagem):
+    print(f"Subindo {caminho_imagem} para o Cloudinary...")
     
-    with open(caminho_imagem, "rb") as f:
-        payload = {"reqtype": "fileupload"}
-        files = {"fileToUpload": f}
-        resposta = requests.post(url, data=payload, files=files)
-        
-    if resposta.status_code == 200:
-        link_direto = resposta.text.strip()
-        print(f"Link limpo gerado: {link_direto}")
-        return link_direto
-    else:
-        print("❌ Erro no Catbox:", resposta.text)
+    cloudinary.config(
+        cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+        api_key=os.getenv("CLOUDINARY_API_KEY"),
+        api_secret=os.getenv("CLOUDINARY_API_SECRET")
+    )
+    
+    try:
+        resultado = cloudinary.uploader.upload(caminho_imagem)
+        link = resultado.get("secure_url")
+        print(f"✅ Link gerado: {link}")
+        return link
+    except Exception as e:
+        print(f"❌ Erro no Cloudinary: {e}")
         return None
 
 
@@ -494,7 +587,7 @@ async def publicar_carrossel_instagram(caminhos_imagens, legenda, url_base):
     for caminho in caminhos_imagens:
         
         # 1. Fazemos o upload para a nuvem ninja e pegamos o link blindado
-        url_imagem_publica = hospedar_imagem_catbox(caminho)
+        url_imagem_publica = hospedar_imagem_cloudinary(caminho)
         
         if not url_imagem_publica:
             return False # Se falhar, aborta a missão
@@ -548,6 +641,12 @@ async def publicar_carrossel_instagram(caminhos_imagens, legenda, url_base):
     
     if "id" in resposta_publish:
         print("Post publicado!")
+        # Limpa os slides da pasta após publicação bem-sucedida
+        for arquivo in glob("carrossel_pronto/*.jpg"):
+            os.remove(arquivo)
+        ultimo_post_gerado["legenda"] = None
+        ultimo_post_gerado["arquivos"] = []
+        print("🧹 Slides publicados removidos da pasta.")
         return True
     else:
         print(f"❌ Erro na publicação final: {resposta_publish}")

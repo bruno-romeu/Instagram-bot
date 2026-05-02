@@ -49,3 +49,4 @@ asyncpg
 greenlet
 Pillow==10.2.0
 feedparser
+cloudinary
